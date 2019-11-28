@@ -1,0 +1,264 @@
+---
+title: "Trafford Prescription Cost Analysis"
+output: html_document
+---
+
+```{r include=FALSE}
+
+library(tidyverse)
+library(dplyr)
+library(htmlwidgets); 
+library(ggplot2)
+library(plotly)
+library(reshape)
+library(leaflet)
+library(leaflet.extras) 
+library(htmlwidgets)
+library(sf)
+library(htmltools)
+```
+
+
+```{r include=FALSE}
+
+
+
+df_presInfo <- read.csv('Detailed_Prescribing_Information_Jun19.csv', colClasses=c(BNF.Code = 'character', Practice.Name = 'character'), fileEncoding="latin1")
+df_bnfCodeInfo <- read.csv('BNF_Code_Information_2019.csv', colClasses=c(BNF.Presentation.Code = 'character'), fileEncoding="latin1")
+
+
+#rename column names
+colnames(df_presInfo) <- c('regional_office_name', 'regional_office_code', 'area_team_name', 'area_team_code',      
+                           'PCO_name', 'PCO_code', 'practice_name', 'practice_code', 'BNF_code', 'BNF_description', 'items', 
+                           'quantity', 'ADQ_usage', 'NIC',  'actual_cost', 'total', 'NIC_per_total' )
+
+
+colnames(df_bnfCodeInfo) <- c('BNF_chapter', 'BNF_chapter_code', 'BNF_section', 'BNF_section_code',  'BNF_paragraph',  'BNF_paragraph_code',        
+                              'BNF_subparagraph', 'BNF_subparagraph_code',  'BNF_chemical_substance', 'BNF_chemical_substance_code', 
+                              'BNF_product', 'BNF_product_code', 'BNF_presentation', 'BNF_code')
+
+
+df <- left_join(df_presInfo, df_bnfCodeInfo, by = "BNF_code")
+
+
+df  <- df  %>% select('PCO_name', 'PCO_code', 'practice_name', 'BNF_chapter', 'BNF_chapter_code', 'BNF_section', 'BNF_paragraph', 'BNF_subparagraph', 'BNF_description', 
+                      'BNF_product', 'BNF_product_code', 'items', 'quantity', 'ADQ_usage', 'NIC',  'actual_cost', 'total', 'NIC_per_total')
+
+
+bnf_chapters <- levels(factor(df$BNF_chapter)); bnf_chapters
+
+df_trafford <- df[which(df$PCO_code == '02A00'),]
+df_trafford_ant_muc <- df_trafford[which(df_trafford$BNF_section == 'Antisecretory Drugs+Mucosal Protectants'),]
+df_agg <- aggregate(as.numeric(as.character(df_trafford_ant_muc[, 18])) , list(df_trafford_ant_muc$practice_name, 
+                                                                               df_trafford_ant_muc$BNF_description), mean)
+
+
+df_agg <- df_agg[order(df_agg$Group.1),]
+
+med_strength <-  gsub(pattern = "\\d+",replacement = "_",x = df_agg$Group.2)
+med_strength <- paste0(regmatches(df_agg$Group.2,regexpr(pattern = "\\d+",text = df_agg$Group.2)), 'mg')
+med_strength <- as.data.frame(med_strength)
+
+df_agg <- cbind(df_agg, med_strength)
+df_agg <- data.frame(medical_centre = df_agg$Group.1, drugs = df_agg$Group.2, NIC_per_Total = df_agg$x, 
+                     med_strength = med_strength)
+
+
+df_agg <- df_agg[order(df_agg$med_strength),]
+df_agg <- df_agg[which(df_agg$med_strength == '10mg'| df_agg$med_strength == '20mg' | df_agg$med_strength == '40mg' ),]
+
+
+df_agg <- df_agg[order(df_agg$NIC_per_Total),]
+
+
+```
+
+
+
+```{r include=FALSE}
+
+plot1 <- ggplot(data=df_agg, aes(x=medical_centre, y=NIC_per_Total, fill=drugs)) + 
+  geom_bar(stat="identity") + 
+  facet_grid(~med_strength) +
+  theme(axis.text.x=element_blank())
+
+
+plot1;
+
+graph1 <- ggplotly(plot1, tooltip = c( 'drugs', 'NIC_per_Total', 'medical_centre')); graph1
+
+```
+
+
+```{r include=FALSE}
+
+df_practices <- read.csv('trafford_general_practices.csv', colClasses=c(name = 'character'), fileEncoding="latin1")
+df_practices <- data.frame(toupper(df_practices$name), df_practices$lat, df_practices$lon)
+colnames(df_practices) <- c('medical_centre', 'lat', 'lon')
+df_practices$medical_centre <- as.character(df_practices$medical_centre)
+
+df_agg <- left_join(df_agg, df_practices, by = "medical_centre")
+
+
+sf <- st_as_sf(df_agg, crs = 4326, coords = c("lon", "lat"))
+sf <- sf[order(sf$medical_centre),]
+
+
+#plot graph
+library(scales) ; library(mapview) ; library(leafpop) ; library(plainview)
+
+```
+
+
+```{r include=FALSE}
+
+plot <- function(m){ 
+  m %>% map(function(m){
+    filter(sf, medical_centre == m ) %>%
+      ggplot(aes(x = factor(drugs), y = NIC_per_Total, group = medical_centre)) +
+      geom_col(color = "#e7298a", size = 1) +
+      geom_point(shape = 21, size = 3, colour = "white", fill = "#99998a") +
+      ylim(0, max(sf$NIC_per_Total)) +
+      labs(x = NULL, y = "NIc per Total",
+           title = "Prescription Comparison", 
+           subtitle = m,
+           caption = "Source: DfT") +
+      theme_minimal() +
+      theme(
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.caption = element_text(color = "grey50", size = 8, hjust = 1, margin = margin(t = 15)),
+        axis.title.x = element_text(size = 9, hjust = 1, margin = margin(t = 10)),
+        axis.title.y = element_text(size = 9, angle = 90, hjust = 1, margin = margin(r = 10)),
+        axis.text.x = element_text(angle = 90, hjust = 1, margin = margin(t = 0)))
+  })
+}
+
+
+plot_10mg <- function(m){
+  m %>% map(function(m){
+    filter(sf, medical_centre == m & med_strength == "10mg") %>%
+      ggplot(aes(x = factor(drugs), y = NIC_per_Total, group = medical_centre)) +
+      geom_col(color = "#e7298a", size = 1) +
+      geom_point(shape = 21, size = 3, colour = "white", fill = "#99998a") +
+      ylim(0, max(sf$NIC_per_Total)) +
+      labs(x = NULL, y = "NIc per Total",
+           title = "Prescription Cost Comparision",
+          subtitle = m,
+           caption = "") +
+      theme_minimal() +
+      theme(
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.caption = element_text(color = "grey50", size = 8, hjust = 1, margin = margin(t = 15)),
+        axis.title.x = element_text(size = 9, hjust = 1, margin = margin(t = 10)),
+        axis.title.y = element_text(size = 9, angle = 90, hjust = 1, margin = margin(r = 10)),
+        axis.text.x = element_text(angle = 90, hjust = 1, margin = margin(t = 0)))
+  })
+}
+
+
+
+plot_20mg <- function(m) {
+   m %>% map(function(m){
+    filter(sf, medical_centre == m & med_strength == "20mg") %>%
+      ggplot(aes(x = factor(drugs), y = NIC_per_Total, group = medical_centre)) +
+      geom_col(color = "#e7298a", size = 1) +
+      geom_point(shape = 21, size = 3, colour = "white", fill = "#99998a") +
+       ylim(0, max(sf$NIC_per_Total)) +
+      labs(x = NULL, y = "NIc per Total",
+           title = "Prescription Cost Comparision", 
+           subtitle = m,
+           caption = "") +
+      theme_minimal() +
+      theme(
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.caption = element_text(color = "grey50", size = 8, hjust = 1, margin = margin(t = 15)),
+        axis.title.x = element_text(size = 9, hjust = 1, margin = margin(t = 10)),
+        axis.title.y = element_text(size = 9, angle = 90, hjust = 1, margin = margin(r = 10)),
+        axis.text.x = element_text(angle = 90, hjust = 1, margin = margin(t = 0)))
+  })
+}
+
+
+
+plot_40mg <- function(m) {
+  m %>% map(function(m){
+    filter(sf, medical_centre == m & med_strength == "40mg") %>%
+      ggplot(aes(x = factor(drugs), y = NIC_per_Total, group = medical_centre)) +
+      geom_col(color = "#e7298a", size = 1) +
+      geom_point(shape = 21, size = 3, colour = "white", fill = "#99998a") +
+     # scale_y_continuous(expand = c(0.005, 0.005), limits = c(0, NA), labels = comma) +
+      ylim(0, max(sf$NIC_per_Total)) +
+      labs(x = NULL, y = "NIc per Total",
+           title = "Prescription Cost Comparision", 
+           subtitle = m,
+           caption = "") +
+      theme_minimal() +
+      theme(
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.caption = element_text(color = "grey50", size = 8, hjust = 1, margin = margin(t = 15)),
+        axis.title.x = element_text(size = 9, hjust = 1, margin = margin(t = 10)),
+        axis.title.y = element_text(size = 9, angle = 90, hjust = 1, margin = margin(r = 10)),
+        axis.text.x = element_text(angle = 90, hjust = 1, margin = margin(t = 0)))
+  })
+}
+
+
+
+map_10 <- sf %>% mapview(map.types = "CartoDB.Positron",
+                       col = "#FFFFFF", col.regions = "#e7298a", alpha.regions = 1,
+                       label = .$medical_centre,
+                       popup = popupGraph(plot_10mg(.$medical_centre), width = 300, height = 400),
+                       layer.name = "10mg",
+                       legend = FALSE)
+
+
+
+map_20 <- sf %>% mapview(map.types = "CartoDB.Positron",
+                      col = "#FFFFFF", col.regions = "#e7298a", alpha.regions = 1,
+                      label = .$medical_centre, 
+                      popup = popupGraph(plot_20mg(.$medical_centre), width = 300, height = 400),
+                      layer.name = "20mg", 
+                      legend = FALSE)
+
+
+
+
+map_40 <- sf %>% mapview(map.types = "CartoDB.Positron",
+                         col = "#FFFFFF", col.regions = "#e7298a", alpha.regions = 1,
+                         label = .$medical_centre, 
+                         popup = popupGraph(plot_40mg(.$medical_centre), width = 300, height = 400),
+                         layer.name = "40mg", 
+                         legend = FALSE)
+
+
+
+ map_10 + map_20 + map_40 
+
+
+```
+
+
+```{r, echo=FALSE}
+
+ graph1
+```
+
+<br/>
+
+
+```{r, echo=FALSE}
+
+ map_10 + map_20 + map_40 
+```
+
+
+
+
